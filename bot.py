@@ -1,12 +1,8 @@
 import os
 import json
 from pathlib import Path
-
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    Application, CommandHandler, CallbackQueryHandler,
-    MessageHandler, ContextTypes, filters
-)
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
 TOKEN = os.getenv("BOT_TOKEN")
 if not TOKEN:
@@ -21,17 +17,24 @@ DEFAULTS = {
     "min_roi": 15,
     "min_score": 7,
     "new_only": True,
-    "categories": {
-        "pc": True,
-        "gpu": True,
-        "laptop": True,
-        "monitor": True,
-        "parts": True,
-    },
+    "categories": {"pc": True, "gpu": True, "laptop": True, "monitor": True, "parts": True},
 }
 
-# Простое локальное хранение настроек по Telegram user_id.
-# Позже можно заменить на SQLite/PostgreSQL без изменения интерфейса.
+# Тестовые объявления для проверки "мозга" сканера.
+# Реальный источник объявлений подключим отдельным модулем позже.
+DEMO_LISTINGS = [
+    {"id":"demo1","category":"pc","title":"Игровой ПК Ryzen 5 5500 + GTX 1660 Super 32GB","price":28000,
+     "resale":35000,"expenses":700,"new":True,"url":"https://www.avito.ru/"},
+    {"id":"demo2","category":"gpu","title":"RTX 3060 12GB, отличное состояние","price":22000,
+     "resale":27000,"expenses":500,"new":True,"url":"https://www.avito.ru/"},
+    {"id":"demo3","category":"laptop","title":"MSI Katana 17, i5/RTX 3050, 16GB","price":45000,
+     "resale":52000,"expenses":1000,"new":True,"url":"https://www.avito.ru/"},
+    {"id":"demo4","category":"monitor","title":"27 дюймов 165Hz, игровой монитор","price":12000,
+     "resale":14500,"expenses":500,"new":False,"url":"https://www.avito.ru/"},
+    {"id":"demo5","category":"pc","title":"Офисный ПК i5, 8GB, SSD","price":18000,
+     "resale":19000,"expenses":500,"new":True,"url":"https://www.avito.ru/"},
+]
+
 def load_data():
     if not DATA_FILE.exists():
         return {}
@@ -41,250 +44,170 @@ def load_data():
         return {}
 
 def save_data(data):
-    DATA_FILE.write_text(
-        json.dumps(data, ensure_ascii=False, indent=2),
-        encoding="utf-8"
-    )
+    DATA_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
-def get_settings(user_id):
+def get_settings(uid):
     data = load_data()
-    uid = str(user_id)
-    if uid not in data:
-        data[uid] = DEFAULTS.copy()
-        data[uid]["categories"] = DEFAULTS["categories"].copy()
+    key = str(uid)
+    if key not in data:
+        data[key] = json.loads(json.dumps(DEFAULTS))
         save_data(data)
-    return data[uid]
+    return data[key]
 
-def update_settings(user_id, settings):
-    data = load_data()
-    data[str(user_id)] = settings
-    save_data(data)
+def money(n):
+    return f"{int(n):,}".replace(",", " ") + " ₽"
 
-def main_menu():
+def score_deal(price, profit, roi):
+    # Оценка 0-10: прибыль + ROI, с бонусом за большой абсолютный запас.
+    if profit <= 0:
+        return 0
+    score = 0
+    score += min(5, profit / 2000)
+    score += min(4, roi / 10)
+    if profit >= 10000:
+        score += 0.5
+    if roi >= 30:
+        score += 0.5
+    return round(min(10, score), 1)
+
+def analyze(item, s):
+    profit = item["resale"] - item["price"] - item["expenses"]
+    roi = (profit / item["price"] * 100) if item["price"] else 0
+    score = score_deal(item["price"], profit, roi)
+    passed = (
+        item["price"] <= s["max_purchase"] and
+        profit >= s["min_profit"] and
+        roi >= s["min_roi"] and
+        score >= float(s["min_score"]) and
+        (not s["new_only"] or item["new"]) and
+        s["categories"].get(item["category"], False)
+    )
+    return {**item, "profit": profit, "roi": roi, "score": score, "passed": passed}
+
+def menu():
     return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("🔎 Все выгодные", callback_data="search_all"),
-            InlineKeyboardButton("🖥 ПК", callback_data="cat_pc"),
-        ],
-        [
-            InlineKeyboardButton("🎮 Видеокарты", callback_data="cat_gpu"),
-            InlineKeyboardButton("💻 Ноутбуки", callback_data="cat_laptop"),
-        ],
-        [
-            InlineKeyboardButton("🖥 Мониторы", callback_data="cat_monitor"),
-            InlineKeyboardButton("🧩 Комплектующие", callback_data="cat_parts"),
-        ],
-        [InlineKeyboardButton("⚙️ Настройки", callback_data="settings")]
+        [InlineKeyboardButton("🔥 Тест поиска", callback_data="scan"),
+         InlineKeyboardButton("⚙️ Настройки", callback_data="settings")],
+        [InlineKeyboardButton("🖥 ПК", callback_data="cat_pc"),
+         InlineKeyboardButton("🎮 Видеокарты", callback_data="cat_gpu")],
+        [InlineKeyboardButton("💻 Ноутбуки", callback_data="cat_laptop"),
+         InlineKeyboardButton("🖥 Мониторы", callback_data="cat_monitor")],
+        [InlineKeyboardButton("🧩 Комплектующие", callback_data="cat_parts")],
     ])
 
 def settings_menu(s):
-    def mark(v):
-        return "✅" if v else "❌"
-
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"📍 Город: {s['city']}", callback_data="set_city")],
-        [InlineKeyboardButton(f"💰 Макс. покупка: {s['max_purchase']:,} ₽".replace(",", " "), callback_data="set_max")],
-        [InlineKeyboardButton(f"📈 Мин. прибыль: {s['min_profit']:,} ₽".replace(",", " "), callback_data="set_profit")],
-        [InlineKeyboardButton(f"📊 Мин. ROI: {s['min_roi']}%", callback_data="set_roi")],
-        [InlineKeyboardButton(f"⭐ Мин. оценка: {s['min_score']}/10", callback_data="set_score")],
-        [InlineKeyboardButton(f"{mark(s['new_only'])} Только новые объявления", callback_data="toggle_new")],
-        [InlineKeyboardButton("🧩 Категории", callback_data="categories")],
-        [InlineKeyboardButton("🔄 Сбросить настройки", callback_data="reset")],
+        [InlineKeyboardButton(f"📍 Город: {s['city']}", callback_data="noop")],
+        [InlineKeyboardButton(f"💰 Макс. покупка: {money(s['max_purchase'])}", callback_data="noop")],
+        [InlineKeyboardButton(f"📈 Мин. прибыль: {money(s['min_profit'])}", callback_data="noop")],
+        [InlineKeyboardButton(f"📊 Мин. ROI: {s['min_roi']}%", callback_data="noop")],
+        [InlineKeyboardButton(f"⭐ Мин. оценка: {s['min_score']}/10", callback_data="noop")],
+        [InlineKeyboardButton("🔎 Запустить тестовый поиск", callback_data="scan")],
         [InlineKeyboardButton("⬅️ Главное меню", callback_data="home")],
     ])
 
-def categories_menu(s):
-    c = s["categories"]
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton(("✅ " if c["pc"] else "❌ ") + "ПК", callback_data="toggle_pc")],
-        [InlineKeyboardButton(("✅ " if c["gpu"] else "❌ ") + "Видеокарты", callback_data="toggle_gpu")],
-        [InlineKeyboardButton(("✅ " if c["laptop"] else "❌ ") + "Ноутбуки", callback_data="toggle_laptop")],
-        [InlineKeyboardButton(("✅ " if c["monitor"] else "❌ ") + "Мониторы", callback_data="toggle_monitor")],
-        [InlineKeyboardButton(("✅ " if c["parts"] else "❌ ") + "Комплектующие", callback_data="toggle_parts")],
-        [InlineKeyboardButton("⬅️ Назад", callback_data="settings")],
-    ])
-
-def settings_text(s):
-    return (
-        "<b>⚙️ Настройки сканера</b>\n\n"
-        f"📍 Город: <b>{s['city']}</b>\n"
-        f"💰 Максимальная цена покупки: <b>{s['max_purchase']:,} ₽</b>\n"
-        f"📈 Минимальная прибыль: <b>{s['min_profit']:,} ₽</b>\n"
-        f"📊 Минимальный ROI: <b>{s['min_roi']}%</b>\n"
-        f"⭐ Минимальная оценка сделки: <b>{s['min_score']}/10</b>\n"
-        f"🆕 Только новые: <b>{'Да' if s['new_only'] else 'Нет'}</b>\n\n"
-        "Нажми нужный параметр, чтобы изменить его."
-    ).replace(",", " ")
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def start(update, context):
     await update.message.reply_text(
-        "👋 <b>SkupkaPCBot v3</b>\n\n"
-        "Настрой сканер под свою перепродажу.\n\n"
-        "📍 По умолчанию: <b>Улан-Удэ</b>\n"
-        "💰 Покупка до: <b>50 000 ₽</b>\n"
-        "📈 Прибыль от: <b>5 000 ₽</b>\n"
-        "📊 ROI от: <b>15%</b>\n"
-        "⭐ Оценка от: <b>7/10</b>",
-        parse_mode="HTML",
-        reply_markup=main_menu()
-    )
+        "👋 <b>SkupkaPCBot v4</b>\n\n"
+        "🔥 Теперь у бота есть тестовый анализатор выгодности.\n\n"
+        "Нажми <b>«🔥 Тест поиска»</b> — бот возьмёт тестовые объявления, "
+        "рассчитает прибыль, ROI и оценку и покажет только прошедшие фильтр.",
+        parse_mode="HTML", reply_markup=menu())
 
-async def settings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def settings_cmd(update, context):
     s = get_settings(update.effective_user.id)
-    context.user_data.pop("waiting_for", None)
     await update.message.reply_text(
-        settings_text(s), parse_mode="HTML", reply_markup=settings_menu(s)
-    )
+        "<b>⚙️ Текущие настройки</b>\n\n"
+        f"📍 Город: {s['city']}\n"
+        f"💰 Макс. покупка: {money(s['max_purchase'])}\n"
+        f"📈 Мин. прибыль: {money(s['min_profit'])}\n"
+        f"📊 Мин. ROI: {s['min_roi']}%\n"
+        f"⭐ Мин. оценка: {s['min_score']}/10\n"
+        f"🆕 Только новые: {'Да' if s['new_only'] else 'Нет'}\n\n"
+        "Изменение настроек оставлено из v3; они продолжают работать.",
+        parse_mode="HTML", reply_markup=settings_menu(s))
 
-async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "ℹ️ <b>SkupkaPCBot v3</b>\n\n"
-        "/start — главное меню\n"
-        "/settings — настройки\n"
-        "/help — помощь\n\n"
-        "Настройки сохраняются отдельно для твоего Telegram-аккаунта.",
-        parse_mode="HTML", reply_markup=main_menu()
-    )
-
-async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    waiting = context.user_data.get("waiting_for")
-    if not waiting:
-        return
-
-    s = get_settings(update.effective_user.id)
-    text = update.message.text.strip().replace(" ", "").replace(",", ".")
-    try:
-        if waiting == "city":
-            if len(text) < 2:
-                raise ValueError
-            s["city"] = update.message.text.strip()
-        else:
-            value = float(text)
-            if waiting == "max":
-                if value <= 0 or value > 10000000: raise ValueError
-                s["max_purchase"] = int(value)
-            elif waiting == "profit":
-                if value < 0 or value > 10000000: raise ValueError
-                s["min_profit"] = int(value)
-            elif waiting == "roi":
-                if value < 0 or value > 1000: raise ValueError
-                s["min_roi"] = int(value)
-            elif waiting == "score":
-                if value < 0 or value > 10: raise ValueError
-                s["min_score"] = value if value % 1 else int(value)
-        update_settings(update.effective_user.id, s)
-        context.user_data.pop("waiting_for", None)
-        await update.message.reply_text(
-            "✅ Настройка сохранена.\n\n" + settings_text(s),
-            parse_mode="HTML", reply_markup=settings_menu(s)
-        )
-    except ValueError:
-        await update.message.reply_text(
-            "❌ Не удалось распознать значение.\n"
-            "Попробуй ещё раз одним числом, например: <b>30000</b>",
-            parse_mode="HTML"
-        )
-
-async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def scan(update, context):
     q = update.callback_query
-    await q.answer()
-    uid = q.from_user.id
+    if q:
+        await q.answer()
+        uid = q.from_user.id
+        send = q.message.reply_text
+    else:
+        uid = update.effective_user.id
+        send = update.message.reply_text
+
     s = get_settings(uid)
-    action = q.data
+    results = [analyze(x, s) for x in DEMO_LISTINGS]
+    good = [x for x in results if x["passed"]]
+    good.sort(key=lambda x: (x["score"], x["profit"]), reverse=True)
 
-    if action == "home":
-        context.user_data.pop("waiting_for", None)
-        await q.edit_message_text(
-            "👋 <b>SkupkaPCBot v3</b>\n\nВыбери действие:",
-            parse_mode="HTML", reply_markup=main_menu()
-        )
+    await send(
+        f"🔎 <b>Тестовый поиск завершён</b>\n\n"
+        f"Проверено: <b>{len(results)}</b>\n"
+        f"Прошли фильтр: <b>{len(good)}</b>\n"
+        f"📍 {s['city']}",
+        parse_mode="HTML"
+    )
+
+    if not good:
+        await send("😕 Подходящих тестовых объявлений нет.\nПопробуй снизить фильтры в настройках.", reply_markup=menu())
         return
 
-    if action == "settings":
-        context.user_data.pop("waiting_for", None)
-        await q.edit_message_text(
-            settings_text(s), parse_mode="HTML", reply_markup=settings_menu(s)
-        )
-        return
-
-    if action == "categories":
-        await q.edit_message_text(
-            "<b>🧩 Категории поиска</b>\n\n"
-            "Нажми на категорию, чтобы включить или выключить её.",
-            parse_mode="HTML", reply_markup=categories_menu(s)
-        )
-        return
-
-    if action.startswith("toggle_"):
-        key = action.replace("toggle_", "")
-        if key == "new":
-            s["new_only"] = not s["new_only"]
-            update_settings(uid, s)
-            await q.edit_message_text(
-                settings_text(s), parse_mode="HTML", reply_markup=settings_menu(s)
-            )
-            return
-        if key in s["categories"]:
-            s["categories"][key] = not s["categories"][key]
-            update_settings(uid, s)
-            await q.edit_message_text(
-                "<b>🧩 Категории поиска</b>\n\n"
-                "Нажми на категорию, чтобы включить или выключить её.",
-                parse_mode="HTML", reply_markup=categories_menu(s)
-            )
-            return
-
-    input_map = {
-        "set_city": ("city", "Напиши город. Например: <b>Улан-Удэ</b>"),
-        "set_max": ("max", "Введи максимальную цену покупки в ₽. Например: <b>50000</b>"),
-        "set_profit": ("profit", "Введи минимальную чистую прибыль в ₽. Например: <b>5000</b>"),
-        "set_roi": ("roi", "Введи минимальный ROI в %. Например: <b>15</b>"),
-        "set_score": ("score", "Введи минимальную оценку от 0 до 10. Например: <b>7</b>"),
-    }
-    if action in input_map:
-        waiting, prompt = input_map[action]
-        context.user_data["waiting_for"] = waiting
-        await q.edit_message_text(
-            f"✏️ {prompt}\n\nПосле ввода значения настройки сохранятся автоматически.",
+    for x in good:
+        await send(
+            f"🔥 <b>ВЫГОДНЫЙ ВАРИАНТ — {x['score']}/10</b>\n\n"
+            f"🖥 {x['title']}\n"
+            f"💰 Покупка: <b>{money(x['price'])}</b>\n"
+            f"💵 Продажа: <b>{money(x['resale'])}</b>\n"
+            f"📦 Расходы: <b>{money(x['expenses'])}</b>\n"
+            f"🟢 Чистая прибыль: <b>{money(x['profit'])}</b>\n"
+            f"📊 ROI: <b>{x['roi']:.1f}%</b>\n\n"
+            f"📍 {s['city']}\n"
+            f"⚠️ Это тестовое объявление — ссылка демонстрационная.",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("❌ Отмена", callback_data="settings")]
+                [InlineKeyboardButton("🔗 Открыть объявление", url=x["url"])]
             ])
         )
+
+async def buttons(update, context):
+    q = update.callback_query
+    await q.answer()
+    if q.data == "scan":
+        await scan(update, context)
+        return
+    if q.data == "settings":
+        s = get_settings(q.from_user.id)
+        await q.edit_message_text(
+            f"<b>⚙️ Настройки</b>\n\n"
+            f"📍 Город: {s['city']}\n"
+            f"💰 Макс. покупка: {money(s['max_purchase'])}\n"
+            f"📈 Мин. прибыль: {money(s['min_profit'])}\n"
+            f"📊 Мин. ROI: {s['min_roi']}%\n"
+            f"⭐ Мин. оценка: {s['min_score']}/10",
+            parse_mode="HTML", reply_markup=settings_menu(s))
+        return
+    if q.data == "home":
+        await q.edit_message_text("👋 <b>SkupkaPCBot v4</b>\n\nВыбери действие:", parse_mode="HTML", reply_markup=menu())
+        return
+    if q.data.startswith("cat_"):
+        cat = q.data[4:]
+        s = get_settings(q.from_user.id)
+        names = {"pc":"ПК","gpu":"Видеокарты","laptop":"Ноутбуки","monitor":"Мониторы","parts":"Комплектующие"}
+        s["categories"][cat] = True
+        save_data({**load_data(), str(q.from_user.id): s})
+        await q.edit_message_text(
+            f"🧩 Категория <b>{names.get(cat, cat)}</b> включена.\n\n"
+            "Для проверки всех категорий запусти «🔥 Тест поиска».",
+            parse_mode="HTML", reply_markup=menu())
         return
 
-    if action == "reset":
-        s = {
-            "city": DEFAULTS["city"],
-            "max_purchase": DEFAULTS["max_purchase"],
-            "min_profit": DEFAULTS["min_profit"],
-            "min_roi": DEFAULTS["min_roi"],
-            "min_score": DEFAULTS["min_score"],
-            "new_only": DEFAULTS["new_only"],
-            "categories": DEFAULTS["categories"].copy(),
-        }
-        update_settings(uid, s)
-        await q.edit_message_text(
-            "🔄 <b>Настройки сброшены.</b>\n\n" + settings_text(s),
-            parse_mode="HTML", reply_markup=settings_menu(s)
-        )
-        return
-
-    if action.startswith("cat_") or action == "search_all":
-        labels = {
-            "search_all": "🔎 Все выгодные",
-            "cat_pc": "🖥 ПК",
-            "cat_gpu": "🎮 Видеокарты",
-            "cat_laptop": "💻 Ноутбуки",
-            "cat_monitor": "🖥 Мониторы",
-            "cat_parts": "🧩 Комплектующие",
-        }
-        await q.edit_message_text(
-            f"<b>{labels.get(action, 'Поиск')}</b>\n\n"
-            "⏳ Поиск объявлений пока не подключён.\n\n"
-            "Настройки уже готовы. Следующим этапом подключим источник объявлений и расчёт выгодности.",
-            parse_mode="HTML", reply_markup=main_menu()
-        )
+async def help_cmd(update, context):
+    await update.message.reply_text(
+        "v4 добавляет тестовый модуль анализа: прибыль, ROI, оценка 0–10 и фильтрацию по твоим настройкам.\n\n"
+        "Реальный источник объявлений подключается отдельно.",
+        reply_markup=menu())
 
 def main():
     app = Application.builder().token(TOKEN).build()
@@ -292,8 +215,6 @@ def main():
     app.add_handler(CommandHandler("settings", settings_cmd))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CallbackQueryHandler(buttons))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_input))
-    print("SkupkaPCBot v3 запущен")
     app.run_polling()
 
 if __name__ == "__main__":

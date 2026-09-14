@@ -1,52 +1,65 @@
 import os
-import logging
-from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
 TOKEN = os.getenv("BOT_TOKEN")
-
-logging.basicConfig(
-    format="%(asctime)s | %(levelname)s | %(message)s",
-    level=logging.INFO,
-)
-
 if not TOKEN:
-    raise RuntimeError("BOT_TOKEN is not set")
+    raise RuntimeError("Не найдена переменная окружения BOT_TOKEN")
+
+def menu():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔎 Все выгодные", callback_data="all"),
+         InlineKeyboardButton("🖥 ПК", callback_data="pc")],
+        [InlineKeyboardButton("🎮 Видеокарты", callback_data="gpu"),
+         InlineKeyboardButton("💻 Ноутбуки", callback_data="laptop")],
+        [InlineKeyboardButton("🖥 Мониторы", callback_data="monitor"),
+         InlineKeyboardButton("⚙️ Настройки", callback_data="settings")]
+    ])
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = (
-        "🤖 SkupkaPCBot запущен!\n\n"
-        "Это первая версия. Команды:\n"
-        "/start — меню\n"
-        "/settings — настройки\n"
-        "/help — помощь\n\n"
-        "Следующим этапом подключим мониторинг выгодных объявлений."
-    )
-    await update.message.reply_text(text)
-
-async def settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "⚙️ Настройки пока базовые.\n\n"
-        "Город: Улан-Удэ\n"
-        "Валюта: ₽\n"
-        "Режим: поиск выгодных объявлений\n\n"
-        "Авито-мониторинг будет подключён следующим этапом."
-    )
+        "👋 <b>SkupkaPCBot</b>\n\n"
+        "Бот для поиска выгодной компьютерной техники.\n\n"
+        "📍 Город: <b>Улан-Удэ</b>\n"
+        "💰 Ищем варианты с запасом для перепродажи.\n\n"
+        "Выбери категорию:",
+        parse_mode="HTML", reply_markup=menu())
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🆘 SkupkaPCBot\n\n"
-        "Бот предназначен для поиска потенциально выгодных предложений "
-        "компьютерной техники для дальнейшей перепродажи.\n\n"
-        "Пока доступен тестовый режим."
-    )
+        "ℹ️ <b>SkupkaPCBot</b>\n\n"
+        "/start — главное меню\n/settings — настройки\n/help — помощь",
+        parse_mode="HTML", reply_markup=menu())
+
+async def settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "⚙️ <b>Настройки</b>\n\n📍 Город: Улан-Удэ\n"
+        "💰 Минимальная прибыль: пока не задана\n"
+        "📊 Минимальная оценка: пока не задана",
+        parse_mode="HTML", reply_markup=menu())
+
+async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    names = {
+        "all": "🔎 Все выгодные", "pc": "🖥 Системные блоки",
+        "gpu": "🎮 Видеокарты", "laptop": "💻 Ноутбуки",
+        "monitor": "🖥 Мониторы", "settings": "⚙️ Настройки"
+    }
+    title = names.get(q.data, "Раздел")
+    await q.edit_message_text(
+        f"<b>{title}</b>\n\n"
+        "Поиск объявлений пока не подключён.\n"
+        "Следующим этапом подключим источник объявлений и фильтр выгодных сделок.",
+        parse_mode="HTML", reply_markup=menu())
 
 def main():
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("settings", settings))
     app.add_handler(CommandHandler("help", help_cmd))
-    logging.info("Bot started")
+    app.add_handler(CommandHandler("settings", settings))
+    app.add_handler(CallbackQueryHandler(buttons))
+    print("SkupkaPCBot запущен")
     app.run_polling()
 
 if __name__ == "__main__":
